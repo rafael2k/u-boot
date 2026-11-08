@@ -9,36 +9,37 @@ again and again.
 This branch enables `CONFIG_ROCKCHIP_RK8XX_DISABLE_BOOT_ON_POWERON` in
 `pinephone-pro-rk3399_defconfig` and extends `rk8xx_off_for_plugin()` for the RK818.
 
-**To turn the phone on inside the keyboard case: wait for the white blink, then
-press Volume Up or Volume Down. The power key does not work there.**
+**To turn the phone on inside the keyboard case, hold the power key for about
+3 s. Pressing Volume Up or Volume Down right after a white blink also works.**
 
 On a plug-in start (RK818 ON_SOURCE 0xae has bit 0x40), U-Boot:
 
-1. blinks all LEDs white once, then watches the volume keys (SARADC channel 1)
-   for 2 s;
-2. boots on a volume key press, and saves the key in the env as `hermes_wake`
-   (`volup-after-blink` or `voldown-after-blink`) plus `hermes_wake_on` (the
-   ON_SOURCE value);
-3. powers off if no key was pressed.
+1. boots if the power key is held. It reads the key through gpio-keys "Power"
+   (GPIO0_A5, via CONFIG_BUTTON_GPIO) and records `pwrkey-held-at-start`;
+2. otherwise blinks all LEDs white once, then watches the power key GPIO and
+   the volume keys (SARADC channel 1) for 2 s;
+3. boots on a key press and records which key it was;
+4. powers off if no key was pressed.
+
+The record goes to the env as `hermes_wake` (`pwrkey-held-at-start`,
+`pwrkey-gpio-after-blink`, `volup-after-blink` or `voldown-after-blink`), with
+`hermes_wake_on` holding the ON_SOURCE value.
+
+Why the power key needs the GPIO: with 5 V present, a power-key start leaves
+ON_SOURCE at 0x40 (plug-in) and never sets the key bit 0x80. The PWRON
+interrupt in INT_STS1 is masked as well. Checking only the RK818 therefore
+treated a key press as a plug-in and powered off.
 
 Tested on 2026-11-08, in the keyboard case with the charger attached:
 
 | Action | Result |
 |---|---|
+| Hold the power key ~3 s | boots (`pwrkey-held-at-start`, ON_SOURCE 0x40) |
 | Volume Up or Volume Down right after the blink | boots |
 | No key | stays off; the blinks stop once the 5 V settles |
-| Power key, before or after the blink | **does not work**: the phone stays off |
 
 Out of the case, with no charger, the power key starts the phone as usual
 (ON_SOURCE 0x80).
-
-The code also has two power-key paths, and neither has worked in testing:
-
-- It boots if ON_SOURCE also has the power-key bit (0x80).
-- It watches RK818 INT_STS1 PWRON during the 2 s window.
-
-The cause is unknown. Either the RK818 doesn't report the key while 5 V is
-present, or it reports it somewhere else.
 
 ## Build and flash (natively on the phone, Debian trixie arm64)
 

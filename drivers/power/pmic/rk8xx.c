@@ -15,6 +15,7 @@
 #include <spi.h>
 #include <sysreset.h>
 #include <adc.h>
+#include <button.h>
 #include <env.h>
 #include <event.h>
 #include <led.h>
@@ -88,10 +89,24 @@ static void hermes_leds(enum led_state_t state)
 #endif
 }
 
+/* The power key is also a GPIO on the SoC (gpio-keys "Power", GPIO0_A5). */
+static bool hermes_pwrkey_gpio(void)
+{
+#if CONFIG_IS_ENABLED(BUTTON)
+	struct udevice *btn;
+
+	if (!button_get_by_label("Power", &btn))
+		return button_get_state(btn) == BUTTON_ON;
+#endif
+	return false;
+}
+
 static const char *hermes_key_pressed(struct udevice *dev)
 {
 	unsigned int raw;
 
+	if (hermes_pwrkey_gpio())
+		return "pwrkey-gpio-after-blink";
 	if (pmic_reg_read(dev, RK818_INT_STS_REG1) & RK818_INT1_PWRON)
 		return "pwrkey-after-blink";
 #if CONFIG_IS_ENABLED(ADC)
@@ -159,6 +174,8 @@ void rk8xx_off_for_plugin(struct udevice *dev)
 		hermes_wake_on = on;
 		if (on & RK8XX_ON_PWRON_KEY)
 			hermes_wake = "pwrkey-start";
+		else if (hermes_pwrkey_gpio())
+			hermes_wake = "pwrkey-held-at-start";
 		else
 			hermes_wake = hermes_watch_keys(dev);
 		if (hermes_wake) {
