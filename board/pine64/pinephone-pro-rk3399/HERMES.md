@@ -9,9 +9,10 @@ again and again.
 This branch enables `CONFIG_ROCKCHIP_RK8XX_DISABLE_BOOT_ON_POWERON` in
 `pinephone-pro-rk3399_defconfig` and extends `rk8xx_off_for_plugin()` for the RK818.
 
-**To turn the phone on with a charger or the keyboard case attached, press and
-hold the power key until the LEDs blink white (about 1-2 s). The phone then
-boots. Only the power key can start it this way.**
+**To turn the phone on with a charger or the keyboard case attached, hold the
+power key for about 3 s. If you let go earlier, the LEDs blink white once;
+press the power key again within 2 s. Only the power key can start it this
+way.**
 
 On a plug-in start (RK818 ON_SOURCE 0xae has bit 0x40), U-Boot:
 
@@ -37,6 +38,7 @@ Tested on 2026-11-08, in the keyboard case with the charger attached:
 | Hold the power key ~3 s | boots (`pwrkey-held-at-start`) |
 | Press the power key ~1 s, then again at the blink | boots (`pwrkey-gpio-after-blink`, key seen at 2990 ms) |
 | No key | stays off; the blinks stop once the 5 V settles |
+| Same three cases, built from this fork's `main` (2027.01-rc1) | all OK; power key held, seen at 2754 ms |
 
 Out of the case, with no charger, the power key starts the phone as usual
 (ON_SOURCE 0x80).
