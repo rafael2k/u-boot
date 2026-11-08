@@ -14,6 +14,14 @@
 #include <power/pmic.h>
 #include <spi.h>
 #include <sysreset.h>
+#include <button.h>
+#include <bootstage.h>
+#include <time.h>
+#include <env.h>
+#include <event.h>
+#include <led.h>
+#include <linux/delay.h>
+#include <dm/uclass.h>
 
 static int rk8xx_sysreset_request(struct udevice *dev, enum sysreset_t type)
 {
@@ -57,6 +65,87 @@ U_BOOT_DRIVER(rk8xx_sysreset) = {
 	.ops		= &rk8xx_sysreset_ops,
 };
 
+/* hermes: on a plug-in start, boot only if the power key is held; otherwise
+ * blink all LEDs once and watch the power key for 2 s more. A key press
+ * boots instead of powering off; how it was seen, and when (ms after
+ * power-on), is saved to the U-Boot env as hermes_wake / hermes_key_ms.
+ */
+#define RK818_INT_STS_REG1	0x4c
+#define RK818_INT_MSK_REG1	0x4d
+#define RK818_INT1_PWRON	BIT(2)
+#define RK8XX_ON_PWRON_KEY	BIT(7)
+
+static const char *hermes_wake;
+static int hermes_wake_on;
+static ulong hermes_key_ms;
+
+static void hermes_leds(enum led_state_t state)
+{
+#if CONFIG_IS_ENABLED(LED)
+	struct udevice *led;
+
+	for (uclass_first_device(UCLASS_LED, &led); led;
+	     uclass_next_device(&led))
+		led_set_state(led, state);
+#endif
+}
+
+/* The power key is also a GPIO on the SoC (gpio-keys "Power", GPIO0_A5). */
+static bool hermes_pwrkey_gpio(void)
+{
+#if CONFIG_IS_ENABLED(BUTTON)
+	struct udevice *btn;
+
+	if (!button_get_by_label("Power", &btn))
+		return button_get_state(btn) == BUTTON_ON;
+#endif
+	return false;
+}
+
+static const char *hermes_key_pressed(struct udevice *dev)
+{
+	if (hermes_pwrkey_gpio())
+		return "pwrkey-gpio-after-blink";
+	if (pmic_reg_read(dev, RK818_INT_STS_REG1) & RK818_INT1_PWRON)
+		return "pwrkey-after-blink";
+	return NULL;
+}
+
+static const char *hermes_watch_keys(struct udevice *dev)
+{
+	const char *key = NULL;
+	int msk, i;
+
+	msk = pmic_reg_read(dev, RK818_INT_MSK_REG1);
+	pmic_reg_write(dev, RK818_INT_STS_REG1, RK818_INT1_PWRON);
+	pmic_reg_write(dev, RK818_INT_MSK_REG1, msk & ~RK818_INT1_PWRON);
+
+	hermes_leds(LEDST_ON);
+	for (i = 0; i < 40 && !key; i++) {	/* 40 x 50 ms = 2 s */
+		if (i == 5)
+			hermes_leds(LEDST_OFF);
+		mdelay(50);
+		key = hermes_key_pressed(dev);
+	}
+	hermes_leds(LEDST_OFF);
+
+	pmic_reg_write(dev, RK818_INT_STS_REG1, RK818_INT1_PWRON);
+	pmic_reg_write(dev, RK818_INT_MSK_REG1, msk);
+	return key;
+}
+
+static int hermes_save_wake(void)
+{
+	if (!hermes_wake)
+		return 0;
+	env_set("hermes_wake", hermes_wake);
+	env_set_hex("hermes_wake_on", hermes_wake_on);
+	env_set_ulong("hermes_key_ms", hermes_key_ms);
+	env_save();
+	return 0;
+}
+EVENT_SPY_SIMPLE(EVT_LAST_STAGE_INIT, hermes_save_wake);
+
 /* In the event of a plug-in and the appropriate option has been
  * selected, we simply shutdown instead of continue the normal boot
  * process. Please note the rk808 is not supported as it doesn't
@@ -65,12 +154,31 @@ U_BOOT_DRIVER(rk8xx_sysreset) = {
 void rk8xx_off_for_plugin(struct udevice *dev)
 {
 	struct rk8xx_priv *priv = dev_get_priv(dev);
+	int on;
 
 	switch (priv->variant) {
 	case RK805_ID:
 	case RK816_ID:
 	case RK818_ID:
-		if (pmic_reg_read(dev, RK8XX_ON_SOURCE) & RK8XX_ON_PLUG_IN) {
+		on = pmic_reg_read(dev, RK8XX_ON_SOURCE);
+		if (!(on & RK8XX_ON_PLUG_IN))
+			break;
+		printf("Plug-in start (on=0x%02x off=0x%02x)\n", on,
+		       pmic_reg_read(dev, RK8XX_OFF_SOURCE));
+		hermes_wake_on = on;
+		if (on & RK8XX_ON_PWRON_KEY)
+			hermes_wake = "pwrkey-start";
+		else if (hermes_pwrkey_gpio())
+			hermes_wake = "pwrkey-held-at-start";
+		else
+			hermes_wake = hermes_watch_keys(dev);
+		if (hermes_wake) {
+			hermes_key_ms = timer_get_boot_us() / 1000;
+			printf("Key %s at %lu ms, booting\n", hermes_wake,
+			       hermes_key_ms);
+			break;
+		}
+		{
 			printf("Power Off due to plug-in event\n");
 			pmic_clrsetbits(dev, REG_DEVCTRL, 0, BIT(0));
 		}
