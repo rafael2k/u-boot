@@ -14,8 +14,9 @@
 #include <power/pmic.h>
 #include <spi.h>
 #include <sysreset.h>
-#include <adc.h>
 #include <button.h>
+#include <bootstage.h>
+#include <time.h>
 #include <env.h>
 #include <event.h>
 #include <led.h>
@@ -64,19 +65,19 @@ U_BOOT_DRIVER(rk8xx_sysreset) = {
 	.ops		= &rk8xx_sysreset_ops,
 };
 
-/* hermes: on a plug-in start, blink all LEDs once and then watch the power
- * key and the volume keys for 2 s. A key press boots instead of powering
- * off, and which key it was is saved to the U-Boot env as hermes_wake.
+/* hermes: on a plug-in start, boot only if the power key is held; otherwise
+ * blink all LEDs once and watch the power key for 2 s more. A key press
+ * boots instead of powering off; how it was seen, and when (ms after
+ * power-on), is saved to the U-Boot env as hermes_wake / hermes_key_ms.
  */
 #define RK818_INT_STS_REG1	0x4c
 #define RK818_INT_MSK_REG1	0x4d
 #define RK818_INT1_PWRON	BIT(2)
 #define RK8XX_ON_PWRON_KEY	BIT(7)
-#define HERMES_SARADC		"saradc@ff100000"
-#define HERMES_KEYS_CHANNEL	1
 
 static const char *hermes_wake;
 static int hermes_wake_on;
+static ulong hermes_key_ms;
 
 static void hermes_leds(enum led_state_t state)
 {
@@ -103,18 +104,10 @@ static bool hermes_pwrkey_gpio(void)
 
 static const char *hermes_key_pressed(struct udevice *dev)
 {
-	unsigned int raw;
-
 	if (hermes_pwrkey_gpio())
 		return "pwrkey-gpio-after-blink";
 	if (pmic_reg_read(dev, RK818_INT_STS_REG1) & RK818_INT1_PWRON)
 		return "pwrkey-after-blink";
-#if CONFIG_IS_ENABLED(ADC)
-	/* 10-bit SARADC at 1.8 V: released ~1023, vol-down ~0.3 V, vol-up ~0 V */
-	if (!adc_channel_single_shot(HERMES_SARADC, HERMES_KEYS_CHANNEL, &raw) &&
-	    raw < 512)
-		return raw < 85 ? "volup-after-blink" : "voldown-after-blink";
-#endif
 	return NULL;
 }
 
@@ -147,6 +140,7 @@ static int hermes_save_wake(void)
 		return 0;
 	env_set("hermes_wake", hermes_wake);
 	env_set_hex("hermes_wake_on", hermes_wake_on);
+	env_set_ulong("hermes_key_ms", hermes_key_ms);
 	env_save();
 	return 0;
 }
@@ -179,7 +173,9 @@ void rk8xx_off_for_plugin(struct udevice *dev)
 		else
 			hermes_wake = hermes_watch_keys(dev);
 		if (hermes_wake) {
-			printf("Key %s, booting\n", hermes_wake);
+			hermes_key_ms = timer_get_boot_us() / 1000;
+			printf("Key %s at %lu ms, booting\n", hermes_wake,
+			       hermes_key_ms);
 			break;
 		}
 		{
